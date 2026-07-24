@@ -27,8 +27,8 @@ jobs:
       contents: read
       packages: write
     with:
-      image-name: garmindashboard          # -> ghcr.io/acid0ikario/garmindashboard
-      workload-path: workloads/garmindashboard   # path in homelab-workloads
+      image-name: webpixel          # -> ghcr.io/acid0ikario/webpixel
+      workload-path: workloads/webpixel   # path in homelab-workloads
     secrets:
       GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}   # PAT with repo scope on homelab-workloads
 ```

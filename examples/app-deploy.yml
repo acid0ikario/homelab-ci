@@ -11,8 +11,8 @@ jobs:
       contents: read
       packages: write
     with:
-      image-name: garmindashboard
-      workload-path: workloads/garmindashboard
+      image-name: webpixel
+      workload-path: workloads/webpixel
       # dockerfile: Dockerfile        # optional
       # context: .                    # optional
       # run-tests: true               # optional
