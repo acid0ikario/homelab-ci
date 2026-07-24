@@ -1,0 +1,20 @@
+# Copy this into an app repo as .github/workflows/deploy.yml
+name: Deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: acid0ikario/homelab-ci/.github/workflows/build-and-deploy.yml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: garmindashboard
+      workload-path: workloads/garmindashboard
+      # dockerfile: Dockerfile        # optional
+      # context: .                    # optional
+      # run-tests: true               # optional
+    secrets:
+      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}

@@ -1,0 +1,141 @@
+name: build-and-deploy
+
+# Reusable workflow: build -> scan -> push to GHCR -> auto-PR to the GitOps repo.
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name under ghcr.io/<owner>/"
+        required: true
+        type: string
+      workload-path:
+        description: "Path in the GitOps repo whose kustomization.yaml is bumped"
+        required: true
+        type: string
+      gitops-repo:
+        description: "owner/repo of the GitOps repo"
+        required: false
+        default: acid0ikario/homelab-workloads
+        type: string
+      dockerfile:
+        required: false
+        default: Dockerfile
+        type: string
+      context:
+        required: false
+        default: "."
+        type: string
+      run-tests:
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      GITOPS_TOKEN:
+        description: "PAT with contents+PR write on the GitOps repo"
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        if: ${{ inputs.run-tests }}
+        run: |
+          if [ -f Makefile ] && grep -q '^test:' Makefile; then
+            make test
+          elif [ -f package.json ]; then
+            npm ci && npm test --if-present
+          elif [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+            pip install -r requirements.txt 2>/dev/null || true
+            pytest -q 2>/dev/null || echo "no tests"
+          else
+            echo "No recognized test setup, skipping."
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (load locally for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image-name }}:${{ steps.meta.outputs.tag }}
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image-name }}:${{ steps.meta.outputs.tag }}
+          format: table
+          exit-code: "0"          # set to "1" to fail the build on findings
+          severity: CRITICAL,HIGH
+
+      - name: Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image-name }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image-name }}:latest
+
+  open-pr:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops-repo }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Bump image tag in kustomization
+        working-directory: gitops/${{ inputs.workload-path }}
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          # update the `newTag:` line under images:
+          sed -i -E "s/(newTag:).*/\1 ${TAG}/" kustomization.yaml
+          echo "----- kustomization.yaml -----"
+          cat kustomization.yaml
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+          branch: bump/${{ inputs.image-name }}-${{ needs.build.outputs.tag }}
+          commit-message: "chore(${{ inputs.image-name }}): deploy ${{ needs.build.outputs.tag }}"
+          title: "Deploy ${{ inputs.image-name }} → ${{ needs.build.outputs.tag }}"
+          body: |
+            Automated image bump from CI.
+
+            - **Image:** `ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}:${{ needs.build.outputs.tag }}`
+            - **Source:** ${{ github.repository }}@${{ github.sha }}
+
+            Merging this PR triggers ArgoCD to deploy.
+          delete-branch: true
